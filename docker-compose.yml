@@ -1,0 +1,71 @@
+services:
+  nifi:
+    image: apache/nifi:2.10.0
+    container_name: nifi
+    hostname: ${NIFI_HOSTNAME:-nifi.local}
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    environment:
+      NIFI_WEB_HTTPS_HOST: 0.0.0.0
+      NIFI_WEB_HTTPS_PORT: "8443"
+      NIFI_WEB_PROXY_HOST: "${NIFI_HOSTNAME:-nifi.local}:8443,localhost:8443"
+
+      # AUTH=tls triggers the image's secure.sh, which enables two-way SSL
+      # and seeds authorizers.xml's Initial Admin Identity. secure.sh reads
+      # its OWN fixed variable names below (KEYSTORE_PATH, etc.) - these
+      # are NOT interchangeable with the generic NIFI_SECURITY_* vars,
+      # which secure.sh does not read at all. The comments show which
+      # nifi.properties key each one ultimately becomes.
+      AUTH: tls
+      KEYSTORE_PATH: /opt/certs/nifi-server.p12                # nifi.security.keystore
+      KEYSTORE_TYPE: PKCS12                                     # nifi.security.keystoreType
+      KEYSTORE_PASSWORD: ${KEYSTORE_PASSWORD}                   # nifi.security.keystorePasswd
+      KEY_PASSWORD: ${KEY_PASSWORD}                             # nifi.security.keyPasswd
+      TRUSTSTORE_PATH: /opt/certs/truststore.jks                # nifi.security.truststore
+      TRUSTSTORE_TYPE: JKS                                      # nifi.security.truststoreType
+      TRUSTSTORE_PASSWORD: ${TRUSTSTORE_PASSWORD}               # nifi.security.truststorePasswd
+      # managed-authorizer is already NiFi's default identifier for the
+      # file-based UserGroupProvider/AccessPolicyProvider, so this line
+      # is not strictly required - it's set explicitly for clarity, and
+      # to guarantee we're not left on a single-user-authorizer default.
+      NIFI_SECURITY_USER_AUTHORIZER: managed-authorizer         # nifi.security.user.authorizer
+      # NOTE: no login-identity-provider is set on purpose.
+      # "single-user-provider" (username/password) would conflict with
+      # certificate-based login - two-way TLS doesn't use a login
+      # identity provider at all; NiFi reads the identity straight off
+      # the client certificate presented during the TLS handshake.
+      INITIAL_ADMIN_IDENTITY: ${INITIAL_ADMIN_IDENTITY}
+
+      NIFI_JVM_HEAP_INIT: 1g
+      NIFI_JVM_HEAP_MAX: 2g
+    volumes:
+      - ./certs:/opt/certs:ro
+      - nifi_database_repository:/opt/nifi/nifi-current/database_repository
+      - nifi_flowfile_repository:/opt/nifi/nifi-current/flowfile_repository
+      - nifi_content_repository:/opt/nifi/nifi-current/content_repository
+      - nifi_provenance_repository:/opt/nifi/nifi-current/provenance_repository
+      - nifi_state:/opt/nifi/nifi-current/state
+      - nifi_conf:/opt/nifi/nifi-current/conf
+      - nifi_logs:/opt/nifi/nifi-current/logs
+    extra_hosts:
+      - "${NIFI_HOSTNAME:-nifi.local}:127.0.0.1"
+    healthcheck:
+      # Dropping "-f": under mTLS an unauthenticated request correctly
+      # gets 401/403 from most endpoints, which "-f" would misread as a
+      # failed healthcheck. Without "-f", curl only fails on a real
+      # connection/TLS error - which is what we actually want to catch.
+      test: ["CMD", "curl", "-k", "-s", "-o", "/dev/null", "https://localhost:8443/nifi-api/access/config"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+volumes:
+  nifi_database_repository:
+  nifi_flowfile_repository:
+  nifi_content_repository:
+  nifi_provenance_repository:
+  nifi_state:
+  nifi_conf:
+  nifi_logs:

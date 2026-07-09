@@ -1,0 +1,93 @@
+name: NiFi mTLS lab - validate and deploy
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shellcheck the cert scripts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh
+
+      - name: Validate docker-compose.yml syntax
+        run: docker compose config >/dev/null
+
+      - name: Generate throwaway certs
+        run: |
+          chmod +x scripts/generate-certs.sh
+          ./scripts/generate-certs.sh
+
+      - name: Bring up NiFi
+        run: docker compose up -d
+
+      - name: Wait for NiFi to accept TLS connections
+        run: |
+          for i in $(seq 1 30); do
+            if bash -c '</dev/tcp/localhost/8443' 2>/dev/null; then
+              echo "NiFi is accepting connections on 8443"
+              exit 0
+            fi
+            echo "Waiting for NiFi... ($i/30)"
+            sleep 10
+          done
+          echo "NiFi never came up in time"
+          exit 1
+
+      - name: Confirm the admin identity was seeded correctly
+        run: |
+          docker compose exec -T nifi \
+            grep -A1 "Initial Admin Identity" /opt/nifi/nifi-current/conf/authorizers.xml \
+            | grep -F "$(grep INITIAL_ADMIN_IDENTITY .env | cut -d= -f2-)"
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs nifi
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  deploy:
+    needs: validate
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: [self-hosted, zbook]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate certs only if this is a first-time deploy
+        run: |
+          chmod +x scripts/generate-certs.sh scripts/add-user.sh
+          if [ ! -f .env ] || [ ! -d certs ]; then
+            echo "No existing certs/.env found - generating for the first time."
+            ./scripts/generate-certs.sh
+          else
+            echo "Existing certs/.env found - leaving them in place so browser-imported certs stay valid."
+          fi
+
+      - name: Deploy
+        run: |
+          docker compose pull
+          docker compose up -d
+
+      - name: Wait for NiFi to accept TLS connections
+        run: |
+          for i in $(seq 1 30); do
+            if bash -c '</dev/tcp/localhost/8443' 2>/dev/null; then
+              echo "NiFi is accepting connections on 8443"
+              exit 0
+            fi
+            echo "Waiting for NiFi... ($i/30)"
+            sleep 10
+          done
+          echo "NiFi never came up in time"
+          docker compose logs nifi
+          exit 1
