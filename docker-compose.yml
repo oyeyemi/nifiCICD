@@ -37,6 +37,33 @@ services:
       # the client certificate presented during the TLS handshake.
       INITIAL_ADMIN_IDENTITY: ${INITIAL_ADMIN_IDENTITY}
 
+      # --- Configuration best practices (per the NiFi Admin Guide) ---
+      # Encrypts sensitive processor properties (passwords/tokens typed
+      # into a flow later). The Admin Guide calls this out as the single
+      # property you should always set explicitly rather than leave to
+      # chance. Generated once by generate-certs.sh and preserved across
+      # re-runs - losing this value makes anything already encrypted
+      # with it unrecoverable, so back up .env somewhere safe.
+      NIFI_SENSITIVE_PROPS_KEY: ${SENSITIVE_PROPS_KEY}
+
+      # Content repository archiving - keeps deleted/superseded content
+      # around briefly for replay via the Provenance UI, bounded so it
+      # can't fill the disk. Defaults are sane; set explicitly so the
+      # bound is visible here rather than buried in image defaults.
+      NIFI_CONTENT_REPOSITORY_ARCHIVE_ENABLED: "true"
+      NIFI_CONTENT_REPOSITORY_ARCHIVE_MAX_RETENTION_PERIOD: "12 hours"
+      NIFI_CONTENT_REPOSITORY_ARCHIVE_MAX_USAGE_PERCENTAGE: "50%"
+
+      # Provenance repository - how long/how much lineage history to
+      # retain. 2 GB / 48h gives a reasonable window for a home lab
+      # without either value being the sole limiting factor day-to-day.
+      NIFI_PROVENANCE_REPOSITORY_MAX_STORAGE_TIME: "48 hours"
+      NIFI_PROVENANCE_REPOSITORY_MAX_STORAGE_SIZE: "2 GB"
+
+      # Caps how many flow.xml.gz backups accumulate in conf/archive/ -
+      # unbounded by default, which quietly grows forever otherwise.
+      NIFI_FLOW_CONFIGURATION_ARCHIVE_MAX_COUNT: "10"
+
       NIFI_JVM_HEAP_INIT: 1g
       NIFI_JVM_HEAP_MAX: 2g
     volumes:
@@ -48,14 +75,33 @@ services:
       - nifi_state:/opt/nifi/nifi-current/state
       - nifi_conf:/opt/nifi/nifi-current/conf
       - nifi_logs:/opt/nifi/nifi-current/logs
+    # The NiFi Admin Guide recommends raising these beyond typical Docker
+    # defaults - NiFi can open many files/threads across its repositories
+    # and processor thread pools, and the low defaults can cause "Too
+    # many open files" errors under real load even though everything
+    # looks fine at idle.
+    ulimits:
+      nofile:
+        soft: 50000
+        hard: 50000
+      nproc:
+        soft: 10000
+        hard: 10000
+    # Caps total container memory so non-heap JVM memory (metaspace,
+    # direct buffers, native libs) plus the JVM heap itself can't exceed
+    # what the host can actually give it. Should be comfortably above
+    # NIFI_JVM_HEAP_MAX (2g) to leave room for that overhead - adjust to
+    # whatever your ZBook can spare.
+    mem_limit: 3g
     extra_hosts:
       - "${NIFI_HOSTNAME:-nifi.local}:127.0.0.1"
     healthcheck:
-      # Dropping "-f": under mTLS an unauthenticated request correctly
-      # gets 401/403 from most endpoints, which "-f" would misread as a
-      # failed healthcheck. Without "-f", curl only fails on a real
-      # connection/TLS error - which is what we actually want to catch.
-      test: ["CMD", "curl", "-k", "-s", "-o", "/dev/null", "https://localhost:8443/nifi-api/access/config"]
+      # Avoids depending on curl (which some NiFi base images omit) and
+      # avoids interpreting HTTP status codes at all. This just confirms
+      # something is actually listening and accepting TCP connections on
+      # 8443, using only bash's built-in /dev/tcp - present in every shell
+      # this image ships, since start.sh itself is a bash script.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8443' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
